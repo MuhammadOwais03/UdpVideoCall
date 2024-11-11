@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Call</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+</head>
+
+<body>
+    <h2>WebRTC Demo</h2>
+    <input type="text" id="username" placeholder="Enter username" />
+    <button id="join">Join</button>
+    <button id="call">Call</button>
+    <button id="hang-up" disabled>Hang Up</button>
+
+    <video id="local-video" autoplay></video>
+    <video id="remote-video" autoplay></video>
+
+    <script>
+        const socket = io.connect("http://127.0.0.1:5000");
+        let localStream, peerConnection;
+        let deferredCandidates = []; 
+        let isCaller = false;
+
+        // Join event
+        document.getElementById("join").onclick = function () {
+            const username = document.getElementById("username").value;
+            console.log("Joining with username:", username);
+            socket.emit("join", { username });
+        };
+
+        // Call event
+        document.getElementById("call").onclick = async function () {
+            const callee = prompt("Enter username of the person you want to call:");
+            const username = document.getElementById("username").value;
+            console.log(`Calling ${callee} from ${username}`);
+            isCaller = true;
+            await startLocalStream();
+            socket.emit("call", { from: username, to: callee });
+        };
+
+        // Hang up event
+        document.getElementById("hang-up").onclick = function () {
+            console.log("Hang up clicked");
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+                console.log("Peer connection closed.");
+            }
+            document.getElementById("hang-up").disabled = true;
+        };
+
+        // Call received event
+        socket.on("call-received", async function (data) {
+            console.log("Call received from:", data.from);
+            const accept = confirm(`${data.from} is calling. Do you want to answer?`);
+            if (accept) {
+                console.log("Answering call...");
+                await startLocalStream();
+                socket.emit("accept-call", { from: data.from, to: data.to });
+            } else {
+                console.log("Rejecting call...");
+                socket.emit("reject-call", { to: data.from });
+            }
+        });
+
+        // Call accepted event
+        socket.on("call-accepted", async function (data) {
+            console.log("Call accepted. Setting up connection...");
+            await createPeerConnection(data.from, data.to);
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            console.log("Sending offer:", offer);
+            socket.emit("offer", { offer, to: data.to });
+        });
+
+        // Call rejected event
+        socket.on("call-rejected", function (data) {
+            console.log("Call rejected:", data.message);
+        });
+
+        // Offer received event
+        socket.on("offer", async function (data) {
+            console.log("Offer received from:", data.from);
+            await createPeerConnection(data.from, data.to);
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            console.log("Sending answer:", answer);
+            socket.emit("answer", { answer, to: data.from });
+        });
+
+        // Answer received event
+        socket.on("answer", async function (data) {
+            if (isCaller) {
+                console.log("Answer received. Setting remote description...");
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            }
+        });
+
+        // ICE candidate received event
+        socket.on("ice-candidate", function (data) {
+            console.log("ICE candidate received:", data.candidate);
+            const candidate = new RTCIceCandidate(data.candidate);
+            if (peerConnection && peerConnection.remoteDescription) {
+                peerConnection.addIceCandidate(candidate)
+                    .then(() => console.log("ICE candidate added successfully."))
+                    .catch(error => console.error("Error adding ICE candidate:", error));
+            } else {
+                console.log("Storing ICE candidate for later.");
+                deferredCandidates.push(candidate);
+            }
+        });
+
+        // Create PeerConnection and add event listeners
+        async function createPeerConnection(caller, callee) {
+            console.log("Creating peer connection...");
+            peerConnection = new RTCPeerConnection();
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    console.log("Sending ICE candidate...");
+                    socket.emit("ice-candidate", { candidate: event.candidate, to: isCaller ? callee : caller });
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                console.log("Remote stream received.");
+                document.getElementById("remote-video").srcObject = event.streams[0];
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                if (peerConnection.connectionState === "connected") {
+                    console.log("Connection established. Processing deferred candidates...");
+                    deferredCandidates.forEach(candidate => peerConnection.addIceCandidate(candidate));
+                    deferredCandidates = [];
+                }
+            };
+
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+        }
+
+        // Start the local media stream
+        async function startLocalStream() {
+            console.log("Starting local stream...");
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById("local-video").srcObject = localStream;
+            console.log("Local stream started.");
+        }
+    </script>
+</body>
+
+</html>
